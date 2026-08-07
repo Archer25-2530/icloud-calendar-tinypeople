@@ -3,4 +3,10 @@ __pycache__/
 *.pyc
 .env
 config.json
+bridge_digests.local.txt
 ops/
+.prod_key.local.json
+.prod_config.local.json
+.stack_compose.local.yml
+.service_token.local.json
+bridge_digests_prod.local.txt

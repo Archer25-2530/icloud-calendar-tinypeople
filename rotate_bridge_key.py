@@ -27,6 +27,13 @@ from pathlib import Path
 DEFAULT_CONFIG = Path.home() / ".tinyPeople" / "conf" / "icloud-calendar" / "config.json"
 
 
+def _default_config_path() -> Path:
+    cfg_env = os.environ.get("ICLOUD_CALENDAR_CONFIG", "").strip()
+    if cfg_env:
+        return Path(cfg_env)
+    return DEFAULT_CONFIG
+
+
 def _make_key_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     suffix = secrets.token_hex(3)
@@ -52,7 +59,11 @@ def _write_config(path: Path, config: dict) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Add a new bridge read-auth key and print digests.")
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to config.json")
+    parser.add_argument(
+        "--config",
+        default=str(_default_config_path()),
+        help="Path to config.json (or set ICLOUD_CALENDAR_CONFIG)",
+    )
     parser.add_argument("--key-id", default="", help="Key ID to create; defaults to a generated ID")
     parser.add_argument("--base-url", default="", help="Optional bridge base URL to pass to generate_digests.py")
     parser.add_argument("--replace-existing", action="store_true", help="Overwrite an existing key_id entry")

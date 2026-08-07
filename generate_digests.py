@@ -26,6 +26,36 @@ ACTION_PATHS = {
 }
 
 
+def _config_candidates():
+    """Return possible config paths in priority order."""
+    candidates = []
+
+    # 1) Explicit override for runtimes where HOME differs.
+    cfg_env = os.environ.get("ICLOUD_CALENDAR_CONFIG", "").strip()
+    if cfg_env:
+        candidates.append(cfg_env)
+
+    # 2) Standard home-based config path.
+    candidates.append(CONFIG_FILE)
+
+    # 3) App-local fallback (useful for troubleshooting).
+    candidates.append(os.path.join(os.path.dirname(__file__), "config.json"))
+
+    # De-duplicate while preserving order.
+    unique = []
+    for path in candidates:
+        if path and path not in unique:
+            unique.append(path)
+    return unique
+
+
+def _resolve_config_path():
+    for cfg_path in _config_candidates():
+        if os.path.exists(cfg_path):
+            return cfg_path
+    return None
+
+
 def resolve_base_url(cli_base_url: str, config: dict) -> str:
     if cli_base_url:
         return cli_base_url.rstrip("/")
@@ -58,11 +88,15 @@ def main():
         help="Base URL of the bridge (or use ICLOUD_BRIDGE_BASE_URL / config bridge.public_base_url)",
     )
     args = parser.parse_args()
-    if not os.path.exists(CONFIG_FILE):
-        print(f"Error: Config not found at {CONFIG_FILE}", file=sys.stderr)
+    config_path = _resolve_config_path()
+    if not config_path:
+        print(
+            f"Error: Config not found. Checked candidates: {_config_candidates()}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    with open(CONFIG_FILE) as f:
+    with open(config_path) as f:
         config = json.load(f)
 
     base_url = resolve_base_url(args.base_url, config)
