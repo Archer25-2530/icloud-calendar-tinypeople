@@ -10,3 +10,4 @@ ops/
 .stack_compose.local.yml
 .service_token.local.json
 bridge_digests_prod.local.txt
+PORTAINER_STACK_UPDATE.txt
