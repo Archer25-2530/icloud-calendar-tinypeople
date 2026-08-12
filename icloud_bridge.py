@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 """
-Read-only iCloud Calendar bridge — Flask/WSGI for cPanel Passenger + LiteSpeed.
+iCloud Calendar bridge — Flask/WSGI for cPanel Passenger + LiteSpeed.
 
 Passenger entry point: passenger_wsgi.py (imports `app` as `application`)
 
-Endpoints (all GET, read-only):
+Read endpoints (GET):
   /health
   /v1/calendars
   /v1/events/today
   /v1/events/upcoming?minutes=30
   /v1/events/list?days=7&limit=20
 
-Auth params (every request):
-  action   — one of: calendars, today, upcoming, list
+Write endpoints (POST, JSON body):
+  /v1/events/create  { calendar, summary, description?, start, end?, all_day? }
+  /v1/events/delete  { identifier, calendar? }
+
+Auth params (every request, query string):
+  action   — one of: calendars, today, upcoming, list, create, delete
   key_id   — identifies which key set to use (supports rotation)
   digest   — sha256("{salt}:{key}:{key_id}:{action}:{path}")
+
+Read actions are checked against bridge.read_auth.keys; create/delete are
+checked against the separate bridge.write_auth.keys, so write access can be
+granted/rotated independently of read access.
 """
 
 import hashlib
@@ -31,7 +39,11 @@ ACTION_PATHS = {
     "today": "/v1/events/today",
     "upcoming": "/v1/events/upcoming",
     "list": "/v1/events/list",
+    "create": "/v1/events/create",
+    "delete": "/v1/events/delete",
 }
+
+WRITE_ACTIONS = {"create", "delete"}
 
 _rate_bucket: dict = {}
 
@@ -88,6 +100,7 @@ def _bridge_cfg() -> dict:
     rl = bridge.get("rate_limit", {})
     return {
         "keys": bridge.get("read_auth", {}).get("keys", {}),
+        "write_keys": bridge.get("write_auth", {}).get("keys", {}),
         "rate_limit": {
             "enabled":        bool(rl.get("enabled", True)),
             "window_seconds": int(rl.get("window_seconds", 60)),
@@ -132,7 +145,8 @@ def _validate_auth(path: str) -> tuple:
     if ACTION_PATHS.get(action) != path:
         return False, "Action does not match endpoint"
 
-    key_cfg = _cfg["keys"].get(key_id, {})
+    key_set = _cfg["write_keys"] if action in WRITE_ACTIONS else _cfg["keys"]
+    key_cfg = key_set.get(key_id, {})
     salt    = key_cfg.get("salt", "")
     key     = key_cfg.get("key",  "")
     if not salt or not key:
@@ -228,6 +242,44 @@ def route_list():
     limit = _parse_int(request.args.get("limit"), 20, 1, 200)
     data = calendar.get_events_list(days=days, limit=limit)
     _debug_log(f"response path=/v1/events/list days={days} limit={limit} count={len((data or {}).get('events', []))}")
+    return jsonify({"ok": True, "data": data})
+
+
+@app.route("/v1/events/create", methods=["POST"])
+def route_create():
+    err = _guard("/v1/events/create")
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    calendar_name = (body.get("calendar") or "").strip()
+    summary = (body.get("summary") or "").strip()
+    start = (body.get("start") or "").strip()
+    end = (body.get("end") or "").strip() or None
+    description = body.get("description") or ""
+    all_day = bool(body.get("all_day", False))
+    if not calendar_name or not summary or not start:
+        return jsonify({"ok": False, "error": "calendar, summary, and start are required"}), 400
+    data = calendar.create_event(calendar_name, summary, start, end, description, all_day)
+    _debug_log(f"response path=/v1/events/create calendar={calendar_name} ok={'error' not in data}")
+    if data.get("error"):
+        return jsonify({"ok": False, "error": data["error"]}), 400
+    return jsonify({"ok": True, "data": data})
+
+
+@app.route("/v1/events/delete", methods=["POST"])
+def route_delete():
+    err = _guard("/v1/events/delete")
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    identifier = (body.get("identifier") or "").strip()
+    calendar_name = (body.get("calendar") or "").strip() or None
+    if not identifier:
+        return jsonify({"ok": False, "error": "identifier is required"}), 400
+    data = calendar.cmd_delete(identifier, calendar_name)
+    _debug_log(f"response path=/v1/events/delete identifier={identifier} ok={'error' not in data}")
+    if data.get("error"):
+        return jsonify({"ok": False, "error": data["error"]}), 404
     return jsonify({"ok": True, "data": data})
 
 

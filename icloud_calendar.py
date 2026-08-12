@@ -182,8 +182,26 @@ if not load_config():
         print(f"  - {candidate}")
     sys.exit(1)
 
+def _read_secret_file(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _resolve_app_password():
+    """Prefer a mounted secret file (e.g. Docker secret) over the config field."""
+    secret_path = os.environ.get("ICLOUD_APP_PASSWORD_FILE", "/run/secrets/icloud_app_password").strip()
+    if secret_path and os.path.exists(secret_path):
+        value = _read_secret_file(secret_path)
+        if value:
+            return value
+    return config.get("app_password", "")
+
+
 apple_id = config.get("apple_id", "")
-app_password = config.get("app_password", "")
+app_password = _resolve_app_password()
 
 def run_curl(method, url, data=None, headers=None, check_returncode=False):
     cmd = [CURL_BIN, "-s", "-X", method, url, "-u", f"{apple_id}:{app_password}"]
@@ -390,50 +408,124 @@ def cmd_today():
     """Get today's events"""
     print(json.dumps(get_today_events(), indent=2, ensure_ascii=False))
 
-def cmd_add(summary, description="", minutes=20):
-    """Add event"""
-    # Default: add to first available calendar
-    calendar_name = config.get("default_calendar", "") or (list(CALENDARS.keys())[0] if CALENDARS else "")
+def _parse_input_datetime(value):
+    """Parse an ISO 8601 datetime string, accepting a trailing 'Z'."""
+    v = (value or "").strip()
+    if v.endswith("Z"):
+        v = v[:-1] + "+00:00"
+    return datetime.fromisoformat(v)
+
+
+def create_event(calendar_name, summary, start, end=None, description="", all_day=False):
+    """Create an event on a specific calendar.
+
+    start/end: ISO 8601 datetimes, or YYYY-MM-DD dates when all_day is True.
+    end: exclusive end date for all-day events (day after the last day),
+    matching the convention already used by native iOS calendar tools.
+    """
     cal_id = CALENDARS.get(calendar_name, "")
-    
     if not cal_id:
         return {"error": f"Calendar not found: {calendar_name}"}
-    
+    if not summary:
+        return {"error": "summary is required"}
+    if not start:
+        return {"error": "start is required"}
+
+    event_uid = str(uuid.uuid4())
+
+    if all_day:
+        try:
+            start_date = datetime.strptime(start[:10], "%Y-%m-%d")
+        except ValueError:
+            return {"error": f"Invalid start date: {start}"}
+        if end:
+            try:
+                end_date = datetime.strptime(end[:10], "%Y-%m-%d")
+            except ValueError:
+                return {"error": f"Invalid end date: {end}"}
+        else:
+            end_date = start_date + timedelta(days=1)
+
+        dtstart_line = f"DTSTART;VALUE=DATE:{start_date.strftime('%Y%m%d')}"
+        dtend_line = f"DTEND;VALUE=DATE:{end_date.strftime('%Y%m%d')}"
+        display_start = start_date.strftime("%Y-%m-%d")
+    else:
+        tzid = _configured_event_timezone()
+        event_tz = _resolve_zoneinfo(tzid)
+
+        try:
+            start_dt = _parse_input_datetime(start)
+        except ValueError:
+            return {"error": f"Invalid start datetime: {start}"}
+
+        if end:
+            try:
+                end_dt = _parse_input_datetime(end)
+            except ValueError:
+                return {"error": f"Invalid end datetime: {end}"}
+        else:
+            end_dt = start_dt + timedelta(minutes=30)
+
+        # Floating (naive) input is interpreted in the configured event timezone.
+        if start_dt.tzinfo is None and event_tz:
+            start_dt = start_dt.replace(tzinfo=event_tz)
+        if end_dt.tzinfo is None and event_tz:
+            end_dt = end_dt.replace(tzinfo=event_tz)
+
+        if event_tz and tzid:
+            start_dt = start_dt.astimezone(event_tz)
+            end_dt = end_dt.astimezone(event_tz)
+            dtstart_line = f"DTSTART;TZID={tzid}:{start_dt.strftime('%Y%m%dT%H%M%S')}"
+            dtend_line = f"DTEND;TZID={tzid}:{end_dt.strftime('%Y%m%dT%H%M%S')}"
+        else:
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            start_dt = start_dt.astimezone(timezone.utc)
+            end_dt = end_dt.astimezone(timezone.utc)
+            dtstart_line = f"DTSTART:{start_dt.strftime('%Y%m%dT%H%M%SZ')}"
+            dtend_line = f"DTEND:{end_dt.strftime('%Y%m%dT%H%M%SZ')}"
+
+        display_start = start_dt.strftime("%Y-%m-%d %H:%M")
+
+    ical_lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "BEGIN:VEVENT", dtstart_line, dtend_line, f"SUMMARY:{summary}"]
+    if description:
+        ical_lines.append(f"DESCRIPTION:{description}")
+    ical_lines.extend([f"UID:{event_uid}", "END:VEVENT", "END:VCALENDAR"])
+    ical = "\n".join(ical_lines)
+
+    url = f"{CALDAV_URL}/{USER_ID}/calendars/{cal_id}/{event_uid}.ics"
+    ok = run_curl("PUT", url, data=ical, headers=["Content-Type: text/calendar; charset=utf-8"], check_returncode=True)
+    if not ok:
+        return {"error": f"Failed to create event in {calendar_name}"}
+
+    return {
+        "success": True,
+        "message": f"Added to {calendar_name}: {summary}",
+        "uid": event_uid,
+        "calendar": calendar_name,
+        "start": display_start,
+        "all_day": all_day,
+    }
+
+
+def cmd_add(summary, description="", minutes=20):
+    """Add event (legacy CLI helper: now + N minutes, default calendar)"""
+    calendar_name = config.get("default_calendar", "") or (list(CALENDARS.keys())[0] if CALENDARS else "")
+    if not calendar_name:
+        return {"error": "No calendar configured"}
+
     tzid = _configured_event_timezone()
     event_tz = _resolve_zoneinfo(tzid)
-
-    # Calculate time in configured timezone (or UTC by default).
     now_for_event = datetime.now(event_tz) if event_tz else datetime.now(timezone.utc)
     start_time = now_for_event + timedelta(minutes=minutes)
     end_time = start_time + timedelta(minutes=20)
-    
-    # Generate unique ID
-    event_uid = str(uuid.uuid4())
-    
-    if event_tz and tzid:
-        dtstart_line = f"DTSTART;TZID={tzid}:{start_time.strftime('%Y%m%dT%H%M%S')}"
-        dtend_line = f"DTEND;TZID={tzid}:{end_time.strftime('%Y%m%dT%H%M%S')}"
-    else:
-        dtstart_line = f"DTSTART:{start_time.strftime('%Y%m%dT%H%M%SZ')}"
-        dtend_line = f"DTEND:{end_time.strftime('%Y%m%dT%H%M%SZ')}"
 
-    # Build iCal format
-    ical = f"""BEGIN:VCALENDAR
-VERSION:2.0
-BEGIN:VEVENT
-{dtstart_line}
-{dtend_line}
-SUMMARY:{summary}
-DESCRIPTION:{description}
-UID:{event_uid}
-END:VEVENT
-END:VCALENDAR"""
-    
-    url = f"{CALDAV_URL}/{USER_ID}/calendars/{cal_id}/{event_uid}.ics"
-    
-    result = run_curl("PUT", url, data=ical, headers=["Content-Type: text/calendar; charset=utf-8"])
-    
-    return {"success": True, "message": f"Added to {calendar_name}: {summary}", "time": start_time.strftime("%H:%M"), "uid": event_uid}
+    result = create_event(calendar_name, summary, start_time.isoformat(), end_time.isoformat(), description)
+    if result.get("success"):
+        result["time"] = start_time.strftime("%H:%M")
+    return result
 
 def parse_events_with_uid(result, now):
     """Parse events (including UID)"""
@@ -505,6 +597,7 @@ if __name__ == "__main__":
         print("  python3 icloud_calendar.py today         # Get today's events")
         print("  python3 icloud_calendar.py calendars     # Get calendar list")
         print("  python3 icloud_calendar.py add <title> [minutes]  # Add event")
+        print("  python3 icloud_calendar.py create <calendar> <title> <start> [end] [--all-day]  # Create event")
         print("  python3 icloud_calendar.py delete <title or UID> [calendar name]  # Delete event")
         sys.exit(1)
     
@@ -522,6 +615,17 @@ if __name__ == "__main__":
         summary = sys.argv[2] if len(sys.argv) > 2 else "New Event"
         minutes = int(sys.argv[3]) if len(sys.argv) > 3 else 20
         result = cmd_add(summary, "", minutes)
+        print(json.dumps(result, ensure_ascii=False))
+    elif cmd == "create":
+        rest = sys.argv[2:]
+        all_day = "--all-day" in rest
+        rest = [a for a in rest if a != "--all-day"]
+        if len(rest) < 3:
+            print("Usage: icloud_calendar.py create <calendar> <title> <start> [end] [--all-day]")
+            sys.exit(1)
+        cal_name, title, start = rest[0], rest[1], rest[2]
+        end = rest[3] if len(rest) > 3 else None
+        result = create_event(cal_name, title, start, end, "", all_day)
         print(json.dumps(result, ensure_ascii=False))
     elif cmd == "delete":
         identifier = sys.argv[2] if len(sys.argv) > 2 else ""

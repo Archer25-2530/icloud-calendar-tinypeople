@@ -34,10 +34,10 @@ def _default_config_path() -> Path:
     return DEFAULT_CONFIG
 
 
-def _make_key_id() -> str:
+def _make_key_id(prefix: str = "agent") -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     suffix = secrets.token_hex(3)
-    return f"agent-{stamp}-{suffix}"
+    return f"{prefix}-{stamp}-{suffix}"
 
 
 def _generate_secret(nbytes: int = 32) -> str:
@@ -65,6 +65,12 @@ def main() -> int:
         help="Path to config.json (or set ICLOUD_CALENDAR_CONFIG)",
     )
     parser.add_argument("--key-id", default="", help="Key ID to create; defaults to a generated ID")
+    parser.add_argument(
+        "--auth-type",
+        choices=["read", "write"],
+        default="read",
+        help="Which key set to rotate: read_auth (default) or write_auth",
+    )
     parser.add_argument("--base-url", default="", help="Optional bridge base URL to pass to generate_digests.py")
     parser.add_argument("--replace-existing", action="store_true", help="Overwrite an existing key_id entry")
     parser.add_argument(
@@ -83,10 +89,12 @@ def main() -> int:
 
     config = _load_config(config_path)
     bridge = config.setdefault("bridge", {})
-    read_auth = bridge.setdefault("read_auth", {})
-    keys = read_auth.setdefault("keys", {})
+    auth_section = "write_auth" if args.auth_type == "write" else "read_auth"
+    auth = bridge.setdefault(auth_section, {})
+    keys = auth.setdefault("keys", {})
 
-    key_id = args.key_id.strip() or _make_key_id()
+    key_id_prefix = "agent-write" if args.auth_type == "write" else "agent"
+    key_id = args.key_id.strip() or _make_key_id(key_id_prefix)
     if key_id in keys and not args.replace_existing:
         print(f"Error: key_id already exists: {key_id} (use --replace-existing to overwrite)", file=sys.stderr)
         return 1

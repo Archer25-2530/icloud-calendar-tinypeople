@@ -21,6 +21,14 @@
 				}
 			}
 		},
+		"write_auth": {
+			"keys": {
+				"agent-main-write": {
+					"salt": "replace-with-long-random-salt",
+					"key": "replace-with-long-random-key"
+				}
+			}
+		},
 		"rate_limit": {
 			"enabled": true,
 			"window_seconds": 60,

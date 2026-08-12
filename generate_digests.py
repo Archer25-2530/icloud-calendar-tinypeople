@@ -18,11 +18,16 @@ import sys
 
 CONFIG_FILE = os.path.expanduser("~/.tinyPeople/conf/icloud-calendar/config.json")
 
-ACTION_PATHS = {
+READ_ACTION_PATHS = {
     "calendars": "/v1/calendars",
     "today":     "/v1/events/today",
     "upcoming":  "/v1/events/upcoming",
     "list":      "/v1/events/list",
+}
+
+WRITE_ACTION_PATHS = {
+    "create": "/v1/events/create",
+    "delete": "/v1/events/delete",
 }
 
 
@@ -107,25 +112,30 @@ def main():
         )
         sys.exit(1)
 
-    keys = config.get("bridge", {}).get("read_auth", {}).get("keys", {})
-    if not keys:
-        print("Error: No keys found in bridge.read_auth.keys", file=sys.stderr)
+    read_keys = config.get("bridge", {}).get("read_auth", {}).get("keys", {})
+    write_keys = config.get("bridge", {}).get("write_auth", {}).get("keys", {})
+    if not read_keys and not write_keys:
+        print("Error: No keys found in bridge.read_auth.keys or bridge.write_auth.keys", file=sys.stderr)
         sys.exit(1)
 
-    for key_id, key_cfg in keys.items():
-        salt = key_cfg.get("salt", "")
-        key  = key_cfg.get("key",  "")
-        if not salt or not key or "replace-with" in salt or "replace-with" in key:
-            print(f"[{key_id}] Skipped — salt/key not set (still placeholder)")
-            continue
+    for label, keys, action_paths in (
+        ("read", read_keys, READ_ACTION_PATHS),
+        ("write", write_keys, WRITE_ACTION_PATHS),
+    ):
+        for key_id, key_cfg in keys.items():
+            salt = key_cfg.get("salt", "")
+            key  = key_cfg.get("key",  "")
+            if not salt or not key or "replace-with" in salt or "replace-with" in key:
+                print(f"[{label}:{key_id}] Skipped — salt/key not set (still placeholder)")
+                continue
 
-        print(f"\n=== key_id: {key_id} ===")
-        for action, path in ACTION_PATHS.items():
-            digest = compute_digest(salt, key, key_id, action, path)
-            url    = f"{base_url}{path}?action={action}&key_id={key_id}&digest={digest}"
-            print(f"\n  {action}")
-            print(f"    digest: {digest}")
-            print(f"    url:    {url}")
+            print(f"\n=== {label} key_id: {key_id} ===")
+            for action, path in action_paths.items():
+                digest = compute_digest(salt, key, key_id, action, path)
+                url    = f"{base_url}{path}?action={action}&key_id={key_id}&digest={digest}"
+                print(f"\n  {action}")
+                print(f"    digest: {digest}")
+                print(f"    url:    {url}")
 
     print()
 

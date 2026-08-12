@@ -16,10 +16,12 @@ This project is adapted from [lemoncat7/icloud-calendar](https://github.com/lemo
 
 - Read calendar events via CalDAV
 - Get calendar reminders
-- Add events
+- Add events (specific date/time, all-day, any configured calendar)
 - Delete events
-- Read-only HTTP bridge with static SHA-256 digest auth
-- Multi-key rotation support (no restart needed)
+- HTTP bridge with static SHA-256 digest auth — read (GET) and write (POST) endpoints, backed by separate key sets
+- Optional MCP server (`icloud_mcp_server.py`) exposing the same read/write operations as MCP tools
+- Multi-key rotation support (no restart needed), independently for read and write access
+- App-specific password can be supplied via a mounted secret file instead of the config JSON/env var
 - Runtime debug logging (toggle on/off without restart)
 - Deploy metadata stamping (revision, build timestamp)
 - Rate limiting
@@ -64,6 +66,14 @@ Edit `~/.tinyPeople/conf/icloud-calendar/config.json`:
         }
       }
     },
+    "write_auth": {
+      "keys": {
+        "agent-main-write": {
+          "salt": "replace-with-long-random-salt",
+          "key": "replace-with-long-random-key"
+        }
+      }
+    },
     "rate_limit": {
       "enabled": true,
       "window_seconds": 60,
@@ -72,6 +82,12 @@ Edit `~/.tinyPeople/conf/icloud-calendar/config.json`:
   }
 }
 ```
+
+App password note:
+
+- `app_password` in the config JSON is only a fallback
+- if a file exists at `ICLOUD_APP_PASSWORD_FILE` (default `/run/secrets/icloud_app_password`), its contents are used instead — this is meant for Docker secrets, which aren't visible via `docker inspect` the way env vars are
+- for Docker Compose, mount the password as a `secrets:` entry and set `ICLOUD_APP_PASSWORD_FILE=/run/secrets/icloud_app_password`
 
 Timezone note:
 
@@ -135,22 +151,31 @@ python3 ~/.tinyPeople/scripts/icloud_calendar.py delete "Drink water" "Work"
 python3 ~/.tinyPeople/scripts/icloud_calendar.py delete "f4603e88-5dcc-11ef-9da0-f2b427513b45"
 ```
 
-## Remote Bridge (Read-Only GET)
+## Remote Bridge (HTTP)
 
-Use `icloud_bridge.py` to expose read endpoints for low-capability agents that can only call fixed URLs.
+Use `icloud_bridge.py` to expose calendar endpoints for agents that can only call fixed URLs.
 
 ### Endpoints
+
+Read (GET):
 
 - `GET /v1/calendars`
 - `GET /v1/events/today`
 - `GET /v1/events/upcoming?minutes=30`
 - `GET /v1/events/list?days=7&limit=20`
 
+Write (POST, JSON body), checked against a separate write-auth key set:
+
+- `POST /v1/events/create` — body: `{ "calendar": "...", "summary": "...", "start": "2026-08-12T14:00:00", "end": "2026-08-12T15:00:00", "description": "", "all_day": false }`
+- `POST /v1/events/delete` — body: `{ "identifier": "title or UID", "calendar": "..." }` (`calendar` optional; searches all calendars if omitted)
+
+For `all_day` events, `start`/`end` are `YYYY-MM-DD` and `end` is exclusive (day after the last day), matching native iOS calendar conventions.
+
 ### Auth model
 
 Each request must include query params:
 
-- `action` (one of `calendars`, `today`, `upcoming`, `list`)
+- `action` (one of `calendars`, `today`, `upcoming`, `list`, `create`, `delete`)
 - `key_id` (for rotation)
 - `digest` (precomputed once)
 
@@ -165,6 +190,22 @@ Notes:
 - `salt` and `key` stay server-side in config and are never sent by caller
 - each digest is endpoint-bound via `action` + `path`
 - multiple `key_id` entries are supported for key rotation; keep old and new keys side by side until clients are updated
+- `create`/`delete` digests are validated against `bridge.write_auth.keys`, not `bridge.read_auth.keys` — a read-only key cannot call the write endpoints, and vice versa
+
+## MCP Server
+
+`icloud_mcp_server.py` exposes the same calendar operations as MCP tools (`list_calendars`, `list_events`, `create_event`, `delete_event`) for MCP-speaking clients. It imports `icloud_calendar.py` directly rather than calling the HTTP bridge, so it needs the same `config.json` / secret-file credentials. Run it as its own process, separate from `icloud_bridge.py`:
+
+```bash
+python3 icloud_mcp_server.py
+```
+
+Configure with:
+
+- `ICLOUD_MCP_HOST` (default `0.0.0.0`)
+- `ICLOUD_MCP_PORT` (default `8094`)
+
+It speaks MCP over Streamable HTTP.
 
 ### Precompute digests (once)
 
@@ -274,7 +315,7 @@ https://your-bridge-host.example/v1/events/today?action=today&key_id=agent-main&
 - Use placeholders in repository files (README/example config)
 - Set `bridge.public_base_url` in local config, or pass `--base-url` / `ICLOUD_BRIDGE_BASE_URL` when running `generate_digests.py`
 
-Keep this bridge read-only. Do not expose add/delete endpoints through static digest URLs.
+Keep `write_auth` keys scoped only to trusted agents — anyone with a valid `create`/`delete` digest can create or delete real calendar events. Rotate write keys independently of read keys if a write key is ever suspected of leaking.
 
 ### Key rotation (no client downtime)
 
@@ -315,6 +356,9 @@ This removes the old `key_id` from the config.
 # Use a specific key_id name
 python3 rotate_bridge_key.py --key-id agent-v2
 
+# Rotate a write key instead of a read key
+python3 rotate_bridge_key.py --auth-type write
+
 # Retire multiple old keys
 python3 rotate_bridge_key.py --retire-old agent-main --retire-old agent-v1
 
@@ -324,6 +368,8 @@ python3 rotate_bridge_key.py --config /path/to/config.json
 # Replace an existing key (dangerous)
 python3 rotate_bridge_key.py --key-id agent-main --replace-existing
 ```
+
+`--auth-type` defaults to `read` (rotates `bridge.read_auth.keys`); pass `--auth-type write` to rotate `bridge.write_auth.keys` instead.
 
 ### Rate limiting
 
@@ -367,6 +413,7 @@ These are exposed via the `/health` endpoint for status monitoring and version t
 | `today` | Get today's events |
 | `calendars` | Get calendar list |
 | `add <title> [minutes]` | Add event (default: 20 minutes from now) |
+| `create <calendar> <title> <start> [end] [--all-day]` | Create event on a specific calendar/time (start/end are ISO 8601, or `YYYY-MM-DD` with `--all-day`) |
 | `delete <title or UID> [calendar name]` | Delete event |
 
 ## License
