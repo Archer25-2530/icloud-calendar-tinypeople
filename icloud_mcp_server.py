@@ -66,7 +66,9 @@ if __name__ == "__main__":
 
     # FastMCP's DNS-rebinding guard only allows localhost by default; a client
     # connecting via LAN IP or a tunnel hostname needs those added explicitly.
-    extra_hosts = [h.strip() for h in os.environ.get("ICLOUD_MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    default_hosts = "192.168.0.201:8094,icloud-calendar-mcp-internal.drewhobick.com,icloud-calendar-mcp.drewhobick.com"
+    hosts_raw = os.environ.get("ICLOUD_MCP_ALLOWED_HOSTS", default_hosts)
+    extra_hosts = [h.strip() for h in hosts_raw.split(",") if h.strip()]
     if extra_hosts:
         mcp.settings.transport_security.allowed_hosts.extend(extra_hosts)
         mcp.settings.transport_security.allowed_origins.extend(f"https://{h}" for h in extra_hosts)
