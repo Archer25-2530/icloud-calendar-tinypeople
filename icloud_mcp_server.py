@@ -63,4 +63,13 @@ def delete_event(identifier: str, calendar_name: str = "") -> dict:
 if __name__ == "__main__":
     mcp.settings.host = os.environ.get("ICLOUD_MCP_HOST", "0.0.0.0")
     mcp.settings.port = int(os.environ.get("ICLOUD_MCP_PORT", "8094"))
+
+    # FastMCP's DNS-rebinding guard only allows localhost by default; a client
+    # connecting via LAN IP or a tunnel hostname needs those added explicitly.
+    extra_hosts = [h.strip() for h in os.environ.get("ICLOUD_MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    if extra_hosts:
+        mcp.settings.transport_security.allowed_hosts.extend(extra_hosts)
+        mcp.settings.transport_security.allowed_origins.extend(f"https://{h}" for h in extra_hosts)
+        mcp.settings.transport_security.allowed_origins.extend(f"http://{h}" for h in extra_hosts)
+
     mcp.run(transport="streamable-http")
